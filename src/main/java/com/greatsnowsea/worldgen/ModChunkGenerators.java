@@ -16,6 +16,9 @@ public class ModChunkGenerators {
     public static final DeferredHolder<MapCodec<? extends ChunkGenerator>, MapCodec<SeaChunkGenerator>> SEA =
             CHUNK_GENERATORS.register("sea", () -> SeaChunkGenerator.CODEC);
 
+    public static final DeferredHolder<MapCodec<? extends ChunkGenerator>, MapCodec<NetherSeaChunkGenerator>> NETHER_SEA =
+            CHUNK_GENERATORS.register("nether_sea", () -> NetherSeaChunkGenerator.CODEC);
+
     public static void register(IEventBus modEventBus) {
         CHUNK_GENERATORS.register(modEventBus);
     }

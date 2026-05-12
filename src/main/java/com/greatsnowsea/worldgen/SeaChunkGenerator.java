@@ -7,8 +7,6 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.LevelHeightAccessor;
 import net.minecraft.world.level.NoiseColumn;
-import net.minecraft.world.level.WorldGenLevel;
-import net.minecraft.world.level.WorldGenRegion;
 import net.minecraft.world.level.biome.BiomeManager;
 import net.minecraft.world.level.biome.BiomeSource;
 import net.minecraft.world.level.block.Blocks;
@@ -19,8 +17,9 @@ import net.minecraft.world.level.levelgen.GenerationStep;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.RandomState;
 import net.minecraft.world.level.levelgen.blending.Blender;
-import net.minecraft.world.level.levelgen.structure.StructureManager;
 import net.minecraft.world.level.levelgen.synth.SimplexNoise;
+import net.minecraft.server.level.WorldGenRegion;
+import net.minecraft.world.level.StructureManager;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -33,21 +32,18 @@ public class SeaChunkGenerator extends ChunkGenerator {
             ).apply(instance, instance.stable(SeaChunkGenerator::new))
     );
 
-    // ── World Layout ─────────────────────────────────────────────────────
-    //  Void:        Y=-64 → Y=-1    (open void below water)
-    //  Water:       Y=0   → Y=49    (50 blocks, no solid bottom)
-    //  Islands:     Y≈50  → Y≈70    (emerging from water)
-    //  Air gap:     Y≈70  → Y≈160   (~90 blocks for ships)
-    //  Float layer 1: center Y=180  (top ~190, bottom ~155)
-    //  Air gap:     Y≈190 → Y≈310   (~120 blocks for airships)
-    //  Float layer 2: center Y=330  (top ~340, bottom ~305)
-    //  High sky:    Y≈340 → Y=447
-
+    public static final int SEAFLOOR_THICKNESS = 10;
     public static final int WATER_SURFACE_Y = 49;
     public static final int FLOAT_1_CENTER  = 180;
     public static final int FLOAT_2_CENTER  = 330;
+    public static final int MAX_HEIGHT = 447;
 
-    private final long seed;
+    public static final int MEGA_CELL   = 256;
+    public static final int MEGA_RADIUS = 75;
+
+    private static final int ROOT_CELL = 80;
+
+    public final long seed;
     private final SimplexNoise surfaceMacro;
     private final SimplexNoise surfaceMeso;
     private final SimplexNoise surfaceMicro;
@@ -56,6 +52,11 @@ public class SeaChunkGenerator extends ChunkGenerator {
     private final SimplexNoise float1Detail;
     private final SimplexNoise float2Macro;
     private final SimplexNoise float2Detail;
+    private final SimplexNoise floorThickness;
+    private final SimplexNoise floorHole;
+    private final SimplexNoise megaHoleShape;
+    private final SimplexNoise rootWobble;
+    private final SimplexNoise islandShape;
 
     public SeaChunkGenerator(BiomeSource biomeSource, long seed) {
         super(biomeSource);
@@ -68,9 +69,12 @@ public class SeaChunkGenerator extends ChunkGenerator {
         this.float1Detail  = new SimplexNoise(RandomSource.create(seed + 600L));
         this.float2Macro   = new SimplexNoise(RandomSource.create(seed + 700L));
         this.float2Detail  = new SimplexNoise(RandomSource.create(seed + 800L));
+        this.floorThickness = new SimplexNoise(RandomSource.create(seed + 900L));
+        this.floorHole      = new SimplexNoise(RandomSource.create(seed + 950L));
+        this.megaHoleShape  = new SimplexNoise(RandomSource.create(seed + 975L));
+        this.rootWobble     = new SimplexNoise(RandomSource.create(seed + 985L));
+        this.islandShape    = new SimplexNoise(RandomSource.create(seed + 990L));
     }
-
-    // ── Codec ────────────────────────────────────────────────────────────
 
     @Override
     protected MapCodec<? extends ChunkGenerator> codec() {
@@ -94,25 +98,43 @@ public class SeaChunkGenerator extends ChunkGenerator {
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
         int chunkX = chunk.getPos().getMinBlockX();
         int chunkZ = chunk.getPos().getMinBlockZ();
+        int minBuildHeight = chunk.getMinBuildHeight();
+
+        for (int lx = 0; lx < 16; lx++) {
+            for (int lz = 0; lz < 16; lz++) {
+                placeSeafloor(chunk, pos, chunkX + lx, chunkZ + lz);
+            }
+        }
+
+        for (int lx = 0; lx < 16; lx++) {
+            for (int lz = 0; lz < 16; lz++) {
+                placeRoots(chunk, pos, chunkX + lx, chunkZ + lz, minBuildHeight);
+            }
+        }
 
         for (int lx = 0; lx < 16; lx++) {
             for (int lz = 0; lz < 16; lz++) {
                 int wx = chunkX + lx;
                 int wz = chunkZ + lz;
-
-                // 1) Surface islands rising from the water
                 placeSurfaceIsland(chunk, pos, wx, wz);
-
-                // 2) Floating island layer 1
                 placeFloatingIsland(chunk, pos, wx, wz,
                         FLOAT_1_CENTER, float1Macro, float1Detail, 140.0);
-
-                // 3) Floating island layer 2
                 placeFloatingIsland(chunk, pos, wx, wz,
                         FLOAT_2_CENTER, float2Macro, float2Detail, 100.0);
+            }
+        }
 
-                // 4) Water fill — only where no solid block was placed
-                for (int y = 0; y <= WATER_SURFACE_Y; y++) {
+        for (int lx = 0; lx < 16; lx++) {
+            for (int lz = 0; lz < 16; lz++) {
+                placeRootIsland(chunk, pos, chunkX + lx, chunkZ + lz);
+            }
+        }
+
+        for (int lx = 0; lx < 16; lx++) {
+            for (int lz = 0; lz < 16; lz++) {
+                int wx = chunkX + lx;
+                int wz = chunkZ + lz;
+                for (int y = minBuildHeight; y <= WATER_SURFACE_Y; y++) {
                     pos.set(wx, y, wz);
                     if (chunk.getBlockState(pos).isAir()) {
                         chunk.setBlockState(pos, Blocks.WATER.defaultBlockState(), false);
@@ -124,28 +146,249 @@ public class SeaChunkGenerator extends ChunkGenerator {
         return CompletableFuture.completedFuture(chunk);
     }
 
+    // ── Seafloor ─────────────────────────────────────────────────────────
+
+    private void placeSeafloor(ChunkAccess chunk, BlockPos.MutableBlockPos pos,
+                               int wx, int wz) {
+        int minBuildHeight = chunk.getMinBuildHeight();
+
+        if (isMegaHole(wx, wz)) return;
+
+        double holeNoise = floorHole.getValue(wx / 30.0, wz / 30.0);
+        if (holeNoise > 0.75) return;
+
+        pos.set(wx, minBuildHeight, wz);
+        chunk.setBlockState(pos, Blocks.BEDROCK.defaultBlockState(), false);
+
+        double thicknessNoise = floorThickness.getValue(wx / 60.0, wz / 60.0);
+        int thickness = (int) (1 + (thicknessNoise + 1.0) * 0.5 * SEAFLOOR_THICKNESS);
+        thickness = Math.max(1, Math.min(SEAFLOOR_THICKNESS, thickness));
+
+        int floorTop = minBuildHeight + thickness;
+        for (int y = minBuildHeight + 1; y <= floorTop; y++) {
+            pos.set(wx, y, wz);
+            chunk.setBlockState(pos, Blocks.STONE.defaultBlockState(), false);
+        }
+    }
+
+    // ── Giant Roots ──────────────────────────────────────────────────────
+
+    private void placeRoots(ChunkAccess chunk, BlockPos.MutableBlockPos pos,
+                            int wx, int wz, int minBuildHeight) {
+        int cellX = Math.floorDiv(wx, ROOT_CELL);
+        int cellZ = Math.floorDiv(wz, ROOT_CELL);
+
+        for (int cx = cellX - 2; cx <= cellX + 1; cx++) {
+            for (int cz = cellZ - 2; cz <= cellZ + 1; cz++) {
+                RandomSource rng = RandomSource.create(
+                        seed ^ ((long) cx * 754819321L + (long) cz * 4294967291L));
+                if (rng.nextInt(8) != 0) continue;
+
+                int centerX = cx * ROOT_CELL + rng.nextInt(ROOT_CELL);
+                int centerZ = cz * ROOT_CELL + rng.nextInt(ROOT_CELL);
+                double baseRadius = 3.0 + rng.nextDouble() * 4.0;
+                double maxWobble = baseRadius + 15.0;
+
+                double wobbleX = rootWobble.getValue(centerX / 60.0, centerZ / 60.0) * 12.0;
+                double wobbleZ = rootWobble.getValue(centerX / 60.0 + 100.0, centerZ / 60.0 + 100.0) * 12.0;
+
+                double dx = wx - (centerX + wobbleX);
+                double dz = wz - (centerZ + wobbleZ);
+                double horizDist = Math.sqrt(dx * dx + dz * dz);
+
+                if (horizDist > baseRadius + maxWobble + 2) continue;
+
+                int floorY = getSeafloorTop(centerX, centerZ, minBuildHeight);
+                int topY = MAX_HEIGHT;
+
+                for (int y = floorY; y <= topY; y++) {
+                    double heightFrac = (double) (y - floorY) / (topY - floorY);
+                    double currentRadius = baseRadius * (1.0 - heightFrac * 0.3);
+
+                    double yWobbleX = rootWobble.getValue(y / 30.0, centerX / 40.0) * 5.0;
+                    double yWobbleZ = rootWobble.getValue(y / 30.0, centerZ / 40.0 + 50.0) * 5.0;
+
+                    double ddx = wx - (centerX + wobbleX + yWobbleX);
+                    double ddz = wz - (centerZ + wobbleZ + yWobbleZ);
+                    double dist = Math.sqrt(ddx * ddx + ddz * ddz);
+
+                    if (dist < currentRadius) {
+                        pos.set(wx, y, wz);
+                        chunk.setBlockState(pos, pickRootBlock(dist, currentRadius), false);
+                    }
+                }
+            }
+        }
+    }
+
+    private int getSeafloorTop(int wx, int wz, int minBuildHeight) {
+        if (isMegaHole(wx, wz)) return minBuildHeight;
+        double holeNoise = floorHole.getValue(wx / 30.0, wz / 30.0);
+        if (holeNoise > 0.75) return minBuildHeight;
+        double thicknessNoise = floorThickness.getValue(wx / 60.0, wz / 60.0);
+        int thickness = (int) (1 + (thicknessNoise + 1.0) * 0.5 * SEAFLOOR_THICKNESS);
+        return minBuildHeight + Math.max(1, Math.min(SEAFLOOR_THICKNESS, thickness));
+    }
+
+    private BlockState pickRootBlock(double dist, double radius) {
+        if (dist > radius * 0.7) {
+            return Blocks.OAK_WOOD.defaultBlockState();
+        }
+        return Blocks.STRIPPED_OAK_WOOD.defaultBlockState();
+    }
+
+    // ── Root Island ──────────────────────────────────────────────────────
+
+    private void placeRootIsland(ChunkAccess chunk, BlockPos.MutableBlockPos pos,
+                                 int wx, int wz) {
+        int cellX = Math.floorDiv(wx, ROOT_CELL);
+        int cellZ = Math.floorDiv(wz, ROOT_CELL);
+
+        for (int cx = cellX - 3; cx <= cellX + 2; cx++) {
+            for (int cz = cellZ - 3; cz <= cellZ + 2; cz++) {
+                RandomSource rng = RandomSource.create(
+                        seed ^ ((long) cx * 754819321L + (long) cz * 4294967291L));
+                if (rng.nextInt(8) != 0) continue;
+
+                int centerX = cx * ROOT_CELL + rng.nextInt(ROOT_CELL);
+                int centerZ = cz * ROOT_CELL + rng.nextInt(ROOT_CELL);
+                double baseRadius = 3.0 + rng.nextDouble() * 4.0;
+                double islandBase = 25.0 + rng.nextDouble() * 15.0;
+
+                double wobbleX = rootWobble.getValue(centerX / 60.0, centerZ / 60.0) * 12.0;
+                double wobbleZ = rootWobble.getValue(centerX / 60.0 + 100.0, centerZ / 60.0 + 100.0) * 12.0;
+
+                double dx = wx - (centerX + wobbleX);
+                double dz = wz - (centerZ + wobbleZ);
+                double horizDist = Math.sqrt(dx * dx + dz * dz);
+
+                double coastNoise = islandShape.getValue(
+                        (wx + centerX) / 40.0, (wz + centerZ) / 40.0) * 8.0;
+                double coastNoise2 = islandShape.getValue(
+                        (wx - centerX) / 20.0 + 50.0, (wz - centerZ) / 20.0 + 50.0) * 4.0;
+
+                double effectiveOuter = islandBase + coastNoise + coastNoise2;
+
+                if (horizDist > effectiveOuter) continue;
+
+                int ringBottom = WATER_SURFACE_Y - 12;
+                int ringTop = WATER_SURFACE_Y + 5;
+
+                for (int y = ringBottom; y <= ringTop; y++) {
+                    double yDist = (y - WATER_SURFACE_Y);
+                    double yTaper;
+                    if (yDist >= 0) {
+                        yTaper = 1.0 - (yDist / (ringTop - WATER_SURFACE_Y)) * 0.6;
+                    } else {
+                        yTaper = 1.0 + (yDist / (WATER_SURFACE_Y - ringBottom)) * 0.5;
+                    }
+                    double ringRadius = effectiveOuter * yTaper;
+
+                    if (horizDist < ringRadius) {
+                        pos.set(wx, y, wz);
+                        BlockState existing = chunk.getBlockState(pos);
+                        if (!existing.isAir() && existing.getBlock() != Blocks.WATER) continue;
+
+                        boolean nearRoot = horizDist < baseRadius + 3;
+                        boolean nearEdge = horizDist > effectiveOuter - 5;
+                        chunk.setBlockState(pos, pickIslandBlock(y, nearRoot, nearEdge), false);
+                    }
+                }
+            }
+        }
+    }
+
+    private BlockState pickIslandBlock(int y, boolean nearRoot, boolean nearEdge) {
+        if (y >= WATER_SURFACE_Y + 2) {
+            return nearRoot ? Blocks.GRASS_BLOCK.defaultBlockState()
+                    : nearEdge ? Blocks.SAND.defaultBlockState()
+                    : Blocks.GRASS_BLOCK.defaultBlockState();
+        } else if (y >= WATER_SURFACE_Y) {
+            return nearRoot ? Blocks.GRASS_BLOCK.defaultBlockState()
+                    : Blocks.SAND.defaultBlockState();
+        } else if (y >= WATER_SURFACE_Y - 2) {
+            return Blocks.DIRT.defaultBlockState();
+        } else if (y >= WATER_SURFACE_Y - 5) {
+            return Blocks.STONE.defaultBlockState();
+        } else {
+            return Blocks.DEEPSLATE.defaultBlockState();
+        }
+    }
+
+    // ── Mega-Holes ───────────────────────────────────────────────────────
+
+    private boolean isMegaHole(int wx, int wz) {
+        int minCellX = Math.floorDiv(wx - MEGA_RADIUS, MEGA_CELL);
+        int minCellZ = Math.floorDiv(wz - MEGA_RADIUS, MEGA_CELL);
+        int maxCellX = Math.floorDiv(wx + MEGA_RADIUS, MEGA_CELL);
+        int maxCellZ = Math.floorDiv(wz + MEGA_RADIUS, MEGA_CELL);
+
+        for (int cx = minCellX; cx <= maxCellX; cx++) {
+            for (int cz = minCellZ; cz <= maxCellZ; cz++) {
+                RandomSource rng = RandomSource.create(seed ^ ((long) cx * 341873128712L + (long) cz * 132897987541L));
+                if (rng.nextInt(256) != 0) continue;
+
+                int centerX = cx * MEGA_CELL + rng.nextInt(MEGA_CELL);
+                int centerZ = cz * MEGA_CELL + rng.nextInt(MEGA_CELL);
+
+                double dx = wx - centerX;
+                double dz = wz - centerZ;
+                double warp = megaHoleShape.getValue(wx / 40.0, wz / 40.0) * 15.0;
+                double distSq = (dx + warp) * (dx + warp) + (dz + warp * 0.7) * (dz + warp * 0.7);
+
+                if (distSq < (double) MEGA_RADIUS * MEGA_RADIUS) return true;
+            }
+        }
+        return false;
+    }
+
+    public static BlockPos findNearestMegaHole(long generatorSeed, int fromX, int fromZ, int searchRadius) {
+        int playerCellX = Math.floorDiv(fromX, MEGA_CELL);
+        int playerCellZ = Math.floorDiv(fromZ, MEGA_CELL);
+        int cellRange = searchRadius / MEGA_CELL + 2;
+
+        BlockPos nearest = null;
+        double nearestDistSq = Double.MAX_VALUE;
+
+        for (int cx = playerCellX - cellRange; cx <= playerCellX + cellRange; cx++) {
+            for (int cz = playerCellZ - cellRange; cz <= playerCellZ + cellRange; cz++) {
+                RandomSource rng = RandomSource.create(generatorSeed ^ ((long) cx * 341873128712L + (long) cz * 132897987541L));
+                if (rng.nextInt(256) != 0) continue;
+
+                int centerX = cx * MEGA_CELL + rng.nextInt(MEGA_CELL);
+                int centerZ = cz * MEGA_CELL + rng.nextInt(MEGA_CELL);
+
+                double dx = fromX - centerX;
+                double dz = fromZ - centerZ;
+                double distSq = dx * dx + dz * dz;
+
+                if (distSq < nearestDistSq && distSq < (long) searchRadius * searchRadius) {
+                    nearestDistSq = distSq;
+                    nearest = new BlockPos(centerX, WATER_SURFACE_Y, centerZ);
+                }
+            }
+        }
+        return nearest;
+    }
+
     // ── Surface Islands ──────────────────────────────────────────────────
 
     private void placeSurfaceIsland(ChunkAccess chunk, BlockPos.MutableBlockPos pos,
                                     int wx, int wz) {
-        // Three octaves of 2D noise control island placement & shape
         double macro = surfaceMacro.getValue(wx / 200.0, wz / 200.0);
         double meso  = surfaceMeso.getValue(wx / 80.0, wz / 80.0);
         double micro = surfaceMicro.getValue(wx / 30.0, wz / 30.0);
 
         double density = macro * 0.6 + meso * 0.3 + micro * 0.1;
 
-        // Threshold controls how much of the surface is land (~15-20%)
         double threshold = 0.35;
         if (density <= threshold) return;
 
         double strength = (density - threshold) / (1.0 - threshold);
         double hVar = surfaceHeight.getValue(wx / 60.0, wz / 60.0);
 
-        // Island top: just above water to ~20 blocks above
         int topY = (int) (WATER_SURFACE_Y + 2 + strength * 18 + hVar * 5);
 
-        // Island bottom: extends below water into the void (stalactite-like)
         int bottomY = (int) (WATER_SURFACE_Y - 5 - strength * 30);
         bottomY = Math.max(chunk.getMinBuildHeight(), bottomY);
 
@@ -158,7 +401,6 @@ public class SeaChunkGenerator extends ChunkGenerator {
 
     private BlockState pickSurfaceBlock(int y, int topY, int bottomY) {
         if (y == topY) {
-            // Sandy beaches near water level, grass higher up
             return (topY <= WATER_SURFACE_Y + 3)
                     ? Blocks.SAND.defaultBlockState()
                     : Blocks.GRASS_BLOCK.defaultBlockState();
@@ -182,13 +424,11 @@ public class SeaChunkGenerator extends ChunkGenerator {
 
         double density = macro * 0.7 + detail * 0.3;
 
-        // Floating islands are sparser than surface islands
         double threshold = 0.4;
         if (density <= threshold) return;
 
         double strength = (density - threshold) / (1.0 - threshold);
 
-        // Top: gentle dome. Bottom: long stalactite taper.
         int topHalf    = (int) (3 + strength * 8);
         int bottomHalf = (int) (6 + strength * 18);
 
@@ -200,16 +440,13 @@ public class SeaChunkGenerator extends ChunkGenerator {
             double taperFactor;
 
             if (y >= centerY) {
-                // Top half — gentle parabolic dome
                 distNorm = (double) (y - centerY) / topHalf;
                 taperFactor = 1.0 - distNorm * distNorm;
             } else {
-                // Bottom half — fast stalactite taper
                 distNorm = (double) (centerY - y) / bottomHalf;
                 taperFactor = Math.pow(1.0 - distNorm, 0.5);
             }
 
-            // Skip if too thin (creates natural edge irregularity)
             double effectiveStrength = strength * taperFactor;
             if (effectiveStrength < 0.05) continue;
 
@@ -221,7 +458,6 @@ public class SeaChunkGenerator extends ChunkGenerator {
 
     private BlockState pickFloatingBlock(int y, int centerY, double distNorm) {
         if (y == centerY + (int) (3 + 0.5 * 8)) {
-            // Very top — grass
             return Blocks.GRASS_BLOCK.defaultBlockState();
         } else if (y > centerY) {
             return Blocks.DIRT.defaultBlockState();
@@ -239,7 +475,6 @@ public class SeaChunkGenerator extends ChunkGenerator {
     @Override
     public int getBaseHeight(int x, int z, Heightmap.Types heightmap,
                              LevelHeightAccessor level, RandomState random) {
-        // Surface islands
         double sm = surfaceMacro.getValue(x / 200.0, z / 200.0);
         double sn = surfaceMeso.getValue(x / 80.0, z / 80.0);
         double sc = surfaceMicro.getValue(x / 30.0, z / 30.0);
@@ -251,7 +486,6 @@ public class SeaChunkGenerator extends ChunkGenerator {
             return (int) (WATER_SURFACE_Y + 2 + ss * 18 + hv * 5);
         }
 
-        // Floating islands (check top-down)
         int result = checkFloatHeight(x, z, FLOAT_2_CENTER, float2Macro, float2Detail, 100.0);
         if (result > 0) return result;
 
@@ -287,23 +521,33 @@ public class SeaChunkGenerator extends ChunkGenerator {
         return new NoiseColumn(min, states);
     }
 
-    // ── Carving & Surface ────────────────────────────────────────────────
-
     @Override
     public void applyCarvers(WorldGenRegion level, long seed, RandomState random,
                              BiomeManager biomeManager, StructureManager structureManager,
                              ChunkAccess chunk, GenerationStep.Carving step) {
-        // No caves — solid islands with void between them
     }
 
     @Override
-    public void buildSurface(WorldGenLevel level, StructureManager structureManager,
+    public void buildSurface(WorldGenRegion level, StructureManager structureManager,
                              RandomState random, ChunkAccess chunk) {
-        // Surface already handled directly in fillFromNoise
+    }
+
+    @Override
+    public int getGenDepth() {
+        return 384;
+    }
+
+    @Override
+    public int getMinY() {
+        return -64;
     }
 
     @Override
     public void spawnOriginalMobs(WorldGenRegion level) {
-        // No special initial spawning
+    }
+
+    @Override
+    public void addDebugScreenInfo(java.util.List<String> info,
+                                   RandomState random, BlockPos pos) {
     }
 }
