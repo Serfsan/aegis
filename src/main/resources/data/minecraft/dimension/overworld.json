@@ -1,5 +1,5 @@
 {
-  "type": "minecraft:overworld",
+  "type": "greatsnowsea:sea_overworld",
   "generator": {
     "type": "greatsnowsea:sea",
     "biome_source": {

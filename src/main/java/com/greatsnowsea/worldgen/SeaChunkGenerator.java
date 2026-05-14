@@ -692,7 +692,7 @@ public class SeaChunkGenerator extends ChunkGenerator {
 
     @Override
     public int getGenDepth() {
-        return 384;
+        return 512;
     }
 
     @Override
