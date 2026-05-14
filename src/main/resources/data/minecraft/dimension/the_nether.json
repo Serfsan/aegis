@@ -1,0 +1,11 @@
+{
+  "type": "greatsnowsea:nether_sea",
+  "generator": {
+    "type": "greatsnowsea:nether_sea",
+    "biome_source": {
+      "type": "minecraft:fixed",
+      "biome": "greatsnowsea:sea"
+    },
+    "seed": 42
+  }
+}

@@ -27,7 +27,7 @@ sourceSets.main.resources {
 }
 
 repositories {
-    // Add here additional repositories if required by some of the dependencies below.
+    maven { url 'https://maven.lucko.me/' }
 }
 
 base {
@@ -139,6 +139,8 @@ dependencies {
     // For more info:
     // http://www.gradle.org/docs/current/userguide/artifact_dependencies_tutorial.html
     // http://www.gradle.org/docs/current/userguide/dependency_management.html
+
+    localRuntime files('libs/spark-1.10.124-neoforge.jar')
 }
 
 // This block of code expands all declared replace properties in the specified resource targets.
@@ -174,7 +176,7 @@ publishing {
     }
     repositories {
         maven {
-            url "file://${project.projectDir}/repo"
+            url "https://repo1.maven.org/maven2/"
         }
     }
 }

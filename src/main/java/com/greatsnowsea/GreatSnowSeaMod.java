@@ -1,5 +1,6 @@
 package com.greatsnowsea;
 
+import com.greatsnowsea.block.ModBlocks;
 import com.greatsnowsea.item.ModItems;
 import com.greatsnowsea.worldgen.ModChunkGenerators;
 import net.neoforged.bus.api.IEventBus;
@@ -11,6 +12,7 @@ public class GreatSnowSeaMod {
 
     public GreatSnowSeaMod(IEventBus modEventBus) {
         ModItems.register(modEventBus);
+        ModBlocks.register(modEventBus);
         ModChunkGenerators.register(modEventBus);
     }
 }
